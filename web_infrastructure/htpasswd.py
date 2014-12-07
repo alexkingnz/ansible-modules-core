@@ -61,6 +61,13 @@ options:
       - Used with C(state=present). If specified, the file will be created
         if it does not already exist. If set to "no", will fail if the
         file does not exist
+  alternative_hashes:
+    required: false
+    description:
+      - An alternative, comma-delimited list of hashes that are suitable for
+        the password file being changed.  The first hash in the list will be
+        the default for creating a password.  Any hash supported by passlib
+        can be used.  Don't use this for password files for apache/nginx.
 notes:
   - "This module depends on the I(passlib) Python library, which needs to be installed on all target systems."
   - "On Debian, Ubuntu, or Fedora: install I(python-passlib)."
@@ -74,6 +81,8 @@ EXAMPLES = """
 - htpasswd: path=/etc/nginx/passwdfile name=janedoe password=9s36?;fyNp owner=root group=www-data mode=0640
 # Remove a user from a password file
 - htpasswd: path=/etc/apache2/passwdfile name=foobar state=absent
+# Add a user to a password file suitable for use by libpam-pwdfile
+- htpasswd: path=/etc/mail/passwords name=alex password=oedu2eGh alternative_hashes=sha512_crypt,sha256_crypt,md5_crypt,des_crypt
 """
 
 
@@ -83,6 +92,8 @@ from distutils.version import StrictVersion
 try:
     from passlib.apache import HtpasswdFile
     import passlib
+    from passlib.context import CryptContext
+    from passlib.apache import htpasswd_context
 except ImportError:
     passlib_installed = False
 else:
@@ -95,10 +106,14 @@ def create_missing_directories(dest):
         os.makedirs(destpath)
 
 
-def present(dest, username, password, crypt_scheme, create, check_mode):
+def present(dest, username, password, crypt_scheme, create, alternative_hashes,  check_mode):
     """ Ensures user is present
 
     Returns (msg, changed) """
+    if alternative_hashes:
+        context = CryptContext(schemes=alternative_hashes)
+    else:
+        context = htpasswd_context
     if not os.path.exists(dest):
         if not create:
             raise ValueError('Destination %s does not exist' % dest)
@@ -106,9 +121,9 @@ def present(dest, username, password, crypt_scheme, create, check_mode):
             return ("Create %s" % dest, True)
         create_missing_directories(dest)
         if StrictVersion(passlib.__version__) >= StrictVersion('1.6'):
-            ht = HtpasswdFile(dest, new=True, default_scheme=crypt_scheme)
+            ht = HtpasswdFile(dest, new=True, default_scheme=crypt_scheme, context=context)
         else:
-            ht = HtpasswdFile(dest, autoload=False, default=crypt_scheme)
+            ht = HtpasswdFile(dest, autoload=False, default=crypt_scheme, context=context)
         if getattr(ht, 'set_password', None):
             ht.set_password(username, password)
         else:
@@ -117,9 +132,9 @@ def present(dest, username, password, crypt_scheme, create, check_mode):
         return ("Created %s and added %s" % (dest, username), True)
     else:
         if StrictVersion(passlib.__version__) >= StrictVersion('1.6'):
-            ht = HtpasswdFile(dest, new=False, default_scheme=crypt_scheme)
+            ht = HtpasswdFile(dest, new=False, default_scheme=crypt_scheme, context=context)
         else:
-            ht = HtpasswdFile(dest, default=crypt_scheme)
+            ht = HtpasswdFile(dest, default=crypt_scheme, context=context)
 
         found = None
         if getattr(ht, 'check_password', None):
@@ -181,6 +196,7 @@ def main():
         crypt_scheme=dict(required=False, default=None),
         state=dict(required=False, default="present"),
         create=dict(type='bool', default='yes'),
+        alternative_hashes=dict(required=False, default=None),
 
     )
     module = AnsibleModule(argument_spec=arg_spec,
@@ -193,14 +209,17 @@ def main():
     crypt_scheme = module.params['crypt_scheme']
     state = module.params['state']
     create = module.params['create']
+    alternative_hashes = module.params['alternative_hashes']
     check_mode = module.check_mode
 
     if not passlib_installed:
         module.fail_json(msg="This module requires the passlib Python library")
 
     try:
+        if alternative_hashes:
+            alternative_hashes = alternative_hashes.split(",")
         if state == 'present':
-            (msg, changed) = present(path, username, password, crypt_scheme, create, check_mode)
+            (msg, changed) = present(path, username, password, crypt_scheme, create, alternative_hashes, check_mode)
         elif state == 'absent':
             (msg, changed) = absent(path, username, check_mode)
         else:
